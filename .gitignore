@@ -1,0 +1,36 @@
+# --- Python / backend -------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# --- Node / frontend --------------------------------------------------------
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# --- Environment and secrets ------------------------------------------------
+# Never commit real credentials. .env.example is the documented template and
+# contains names only, never values.
+.env
+.env.*
+!.env.example
+
+# --- Coverage and build output ---------------------------------------------
+coverage/
+.coverage
+htmlcov/
+dist/
+build/
+
+# --- Editor and OS ----------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
