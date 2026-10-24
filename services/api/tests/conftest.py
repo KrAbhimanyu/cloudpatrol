@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from app.core.config import Settings
 from app.core.security import Principal, StubTokenVerifier
 from app.main import create_app
+from tests.fake_aws import FakeAwsAdapter
 
 # Test tokens. These are opaque strings, not credentials of any kind.
 ALICE_TOKEN = "test-token-alice"
@@ -82,3 +83,41 @@ def alice_headers() -> dict[str, str]:
 @pytest.fixture
 def bob_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {BOB_TOKEN}"}
+
+
+@pytest.fixture
+def org(client: TestClient, alice_headers: dict[str, str]) -> str:
+    """An organization owned by alice, created through the real API."""
+    response = client.post(
+        "/api/v1/organizations",
+        headers=alice_headers,
+        json={"name": "Acme", "slug": "acme"},
+    )
+    assert response.status_code == 201, response.text
+    return str(response.json()["id"])
+
+
+@pytest.fixture
+def org_headers(alice_headers: dict[str, str], org: str) -> dict[str, str]:
+    return {**alice_headers, "X-Organization-Id": org}
+
+
+@pytest.fixture
+def fake_adapter(app) -> FakeAwsAdapter:  # type: ignore[no-untyped-def]
+    """Install the in-memory AWS fake on a running app.
+
+    Both the request path (account validation) and the worker path (scan
+    execution) resolve AWS through the connection service and the scan service,
+    so swapping those two covers the whole pipeline. The billing service is a
+    third holder of the adapter and is swapped too, or a scan would reach the
+    real Cost Explorer client.
+    """
+    from app.services.billing import BillingService
+
+    adapter = FakeAwsAdapter()
+    app.state.aws_adapter = adapter
+    app.state.aws_connection_service._adapter = adapter  # noqa: SLF001
+    app.state.scan_service._adapter = adapter  # noqa: SLF001
+    if app.state.scan_service._billing is not None:  # noqa: SLF001
+        app.state.scan_service._billing = BillingService(adapter)
+    return adapter

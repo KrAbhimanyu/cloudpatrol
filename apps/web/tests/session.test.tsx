@@ -1,22 +1,19 @@
 /**
- * Tests for the session store and the async data hook.
+ * Tests for the workspace-preference store and the async data hook.
  *
- * The properties that matter for a cost tool: a request is never fired without
- * a token, a failed load is never indistinguishable from an empty one, and a
- * change of workspace drops the previous workspace's figures rather than
- * showing them under the new heading.
+ * The properties that matter for a cost tool: a failed load is never
+ * indistinguishable from an empty one, and a change of workspace drops the
+ * previous workspace's figures rather than showing them under the new heading.
+ *
+ * The session store no longer holds a credential. These tests assert that:
+ * nothing secret is written to `localStorage`, and signing out removes even
+ * the workspace preference.
  */
 
 import { renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  clearSession,
-  getSnapshot,
-  setOrganizationId,
-  setSession,
-  subscribe,
-} from "@/lib/session";
+import { clearOrganizationId, getSnapshot, setOrganizationId, subscribe } from "@/lib/session";
 import { useAsync } from "@/lib/use-async";
 
 beforeEach(() => {
@@ -27,33 +24,39 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("session store", () => {
+describe("workspace preference store", () => {
   it("is empty before anything is stored", () => {
     expect(getSnapshot()).toBeNull();
   });
 
-  it("returns the stored token and organization", () => {
-    setSession({ token: "tok-1", organizationId: "org-1" });
-    expect(getSnapshot()).toEqual({ token: "tok-1", organizationId: "org-1" });
+  it("returns the stored organization", () => {
+    setOrganizationId("org-1");
+    expect(getSnapshot()).toBe("org-1");
   });
 
-  it("clears both values on sign out", () => {
-    setSession({ token: "tok-1", organizationId: "org-1" });
-    clearSession();
-    expect(getSnapshot()).toBeNull();
+  it("stores the organization under a non-credential key", () => {
+    setOrganizationId("org-1");
+    // The only thing persisted must be the workspace choice. A token under any
+    // key would defeat the move to HttpOnly cookies.
+    expect(window.localStorage.getItem("cloudpatrol.organizationId")).toBe("org-1");
     expect(window.localStorage.getItem("cloudpatrol.token")).toBeNull();
+    for (const key of Object.keys(window.localStorage)) {
+      expect(key.toLowerCase()).not.toContain("token");
+      expect(key.toLowerCase()).not.toContain("secret");
+    }
   });
 
-  it("changes the organization without touching the token", () => {
-    setSession({ token: "tok-1", organizationId: "org-1" });
-    setOrganizationId("org-2");
-    expect(getSnapshot()).toEqual({ token: "tok-1", organizationId: "org-2" });
+  it("clears the organization on sign out", () => {
+    setOrganizationId("org-1");
+    clearOrganizationId();
+    expect(getSnapshot()).toBeNull();
+    expect(window.localStorage.getItem("cloudpatrol.organizationId")).toBeNull();
   });
 
-  it("notifies subscribers when the session changes", () => {
+  it("notifies subscribers when the organization changes", () => {
     const listener = vi.fn();
     const unsubscribe = subscribe(listener);
-    setSession({ token: "tok-1", organizationId: null });
+    setOrganizationId("org-1");
     expect(listener).toHaveBeenCalledTimes(1);
     unsubscribe();
     setOrganizationId("org-9");
@@ -61,7 +64,7 @@ describe("session store", () => {
   });
 
   it("returns a stable reference between reads when nothing changed", () => {
-    setSession({ token: "tok-1", organizationId: "org-1" });
+    setOrganizationId("org-1");
     // An unstable reference here would loop `useSyncExternalStore` forever.
     expect(getSnapshot()).toBe(getSnapshot());
   });

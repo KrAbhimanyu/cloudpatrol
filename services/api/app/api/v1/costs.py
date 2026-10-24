@@ -41,13 +41,39 @@ async def get_cost_summary(
         # permission was never granted or a scan has not run.
         return CostSummaryRead(available=False, currency="USD")
 
-    currency = records[0].currency
-    total = sum((r.amount for r in records), start=Decimal("0"))
+    # A "total" is only meaningful within one currency and one billing period.
+    # Summing observations that span several months would report a figure that
+    # matches no invoice, and summing across currencies would add USD to EUR.
+    # The latest period is the one a user means by "my bill", so that is the
+    # period reported, and observations outside it are excluded from the total
+    # rather than silently folded in.
+    latest_end = max(r.period_end for r in records)
+    current = [r for r in records if r.period_end == latest_end]
+
+    currencies = {r.currency for r in current}
+    if len(currencies) > 1:
+        # Mixed currencies in one period is a data problem, not something to
+        # paper over with a sum. Report the rows, withhold the total.
+        logger.warning(
+            "Cost observations span multiple currencies; withholding a total",
+            extra={"org_id": membership.organization_id, "currencies": sorted(currencies)},
+        )
+        return CostSummaryRead(
+            available=True,
+            currency=next(iter(sorted(currencies))),
+            period_start=min(r.period_start for r in current),
+            period_end=latest_end,
+            total_amount=None,
+            by_service=[CostObservationRead.model_validate(r) for r in current],
+        )
+
+    currency = next(iter(currencies))
+    total = sum((r.amount for r in current), start=Decimal("0"))
     return CostSummaryRead(
         available=True,
         currency=currency,
-        period_start=min(r.period_start for r in records),
-        period_end=max(r.period_end for r in records),
+        period_start=min(r.period_start for r in current),
+        period_end=latest_end,
         total_amount=total,
-        by_service=[CostObservationRead.model_validate(r) for r in records],
+        by_service=[CostObservationRead.model_validate(r) for r in current],
     )

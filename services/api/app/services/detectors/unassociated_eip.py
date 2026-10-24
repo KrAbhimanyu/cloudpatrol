@@ -49,6 +49,8 @@ class UnassociatedElasticIpDetector:
             ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
             evidence: dict[str, object] = {
+                "evidence_source": "ec2:DescribeAddresses (AssociationId absent)",
+                "observation_window": "point-in-time at scan execution",
                 "public_ip": public_ip,
                 "domain": domain,
                 "association_id": None,

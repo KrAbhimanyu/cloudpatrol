@@ -33,12 +33,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/savings", tags=["savings"])
 
 
-def _require_ledger_write(membership_role: str) -> None:  # noqa: ARG001
-    """Ledger writes are an owner/admin action."""
-    # Kept as a named function so the rule has one home and one error message.
-    return None
-
-
 @router.get(
     "/ledger",
     response_model=SavingsLedgerRead,

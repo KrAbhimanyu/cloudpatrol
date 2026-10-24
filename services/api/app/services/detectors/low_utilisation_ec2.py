@@ -127,6 +127,8 @@ class LowUtilisationEc2Detector:
 
             instance_type = str(attributes.get("instance_type") or "unknown")
             evidence: dict[str, object] = {
+                "evidence_source": "cloudwatch:GetMetricStatistics AWS/EC2 CPUUtilization",
+                "observation_window": f"{metrics.window_days} days at 3600s period",
                 "instance_type": instance_type,
                 "instance_state": resource.state,
                 "average_cpu_percent": str(metrics.average_cpu_percent),

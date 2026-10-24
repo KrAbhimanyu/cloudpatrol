@@ -67,27 +67,22 @@ async def create_scan(
     )
 
     # Overlapping scans for one account would duplicate work and race on the
-    # same findings. The check-and-insert is atomic in the repository.
-    with container.store.lock:
-        active = container.scans.find_active_for_account(membership.organization_id, account.id)
-        if active is not None:
-            raise ConflictError(
-                "A scan for this account is already in progress.",
-                details={"scan_id": active.id, "status": active.status},
-            )
-
-        scan = container.scans.create(
-            organization_id=membership.organization_id,
-            aws_account_id=account.id,
-            status="queued",
-            started_at=None,
-            finished_at=None,
-            resource_count=0,
-            finding_count=0,
-            partial_failures=[],
-            error_message=None,
-            created_by=principal.user_id,
-        )
+    # same findings. ``create_if_no_active`` performs the check and the insert as
+    # one operation, so this route no longer reaches into the store's lock: the
+    # in-memory repository takes its own lock, and the PostgreSQL repository uses
+    # a guarded insert backed by a partial unique index.
+    scan = container.scans.create_if_no_active(
+        organization_id=membership.organization_id,
+        aws_account_id=account.id,
+        status="queued",
+        started_at=None,
+        finished_at=None,
+        resource_count=0,
+        finding_count=0,
+        partial_failures=[],
+        error_message=None,
+        created_by=principal.user_id,
+    )
 
     try:
         request.app.state.scan_pool.submit(

@@ -9,11 +9,13 @@ backing store is swapped.
 
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
+from app.core.errors import ConflictError
 from app.repositories.models import (
     AuditEventRecord,
     AwsAccountRecord,
@@ -30,6 +32,8 @@ from app.repositories.models import (
 )
 
 _ACTIVE_SCAN_STATUSES = frozenset({"queued", "running"})
+
+logger = logging.getLogger(__name__)
 
 
 class InMemoryStore:
@@ -208,6 +212,27 @@ class InMemoryScanRepository:
             self._store.scans[scan_id] = updated
             return updated
 
+    def create_if_no_active(self, **fields: Any) -> ScanRecord:
+        """Create a scan unless one is already active for the account.
+
+        The check and the insert run under the store lock, so a concurrent
+        caller cannot slip between them. This is the in-memory counterpart of
+        the guarded insert the PostgreSQL repository performs, and it lets the
+        route stop holding the lock itself.
+        """
+        with self._store.lock:
+            account_id = fields["aws_account_id"]
+            organization_id = fields["organization_id"]
+            active = self.find_active_for_account(organization_id, account_id)
+            if active is not None:
+                raise ConflictError(
+                    "A scan for this account is already in progress.",
+                    details={"scan_id": active.id, "status": active.status},
+                )
+            record = ScanRecord(id=new_id(), created_at=utc_now(), **fields)
+            self._store.scans[record.id] = record
+            return record
+
     def create(self, **fields: Any) -> ScanRecord:
         with self._store.lock:
             record = ScanRecord(id=new_id(), created_at=utc_now(), **fields)
@@ -260,13 +285,18 @@ class InMemoryFindingRepository:
         result = FindingUpsertResult()
         persisted: list[FindingRecord] = []
         with self._store.lock:
-            by_key = {f.dedupe_key: f for f in self._store.findings.values()}
+            # Keyed by organization as well as dedupe_key. The dedupe key
+            # already embeds the account primary key, so a collision across
+            # organizations is not reachable today; scoping by tenant makes the
+            # isolation an enforced invariant rather than a consequence of how
+            # the key happens to be built.
+            by_key = {(f.organization_id, f.dedupe_key): f for f in self._store.findings.values()}
 
             for record in records:
-                existing = by_key.get(record.dedupe_key)
+                existing = by_key.get((record.organization_id, record.dedupe_key))
                 if existing is None:
                     self._store.findings[record.id] = record
-                    by_key[record.dedupe_key] = record
+                    by_key[(record.organization_id, record.dedupe_key)] = record
                     persisted.append(record)
                     result = replace(result, inserted=result.inserted + 1)
                     continue
@@ -287,7 +317,7 @@ class InMemoryFindingRepository:
                     # ``state`` and ``created_at`` deliberately unchanged.
                 )
                 self._store.findings[existing.id] = refreshed
-                by_key[record.dedupe_key] = refreshed
+                by_key[(record.organization_id, record.dedupe_key)] = refreshed
                 persisted.append(refreshed)
                 result = replace(result, refreshed=result.refreshed + 1)
 
@@ -459,6 +489,13 @@ class Container:
 
 
 def build_container() -> Container:
+    """Build the default, in-memory container.
+
+    This is what the application uses, in every environment, including
+    production. PostgreSQL is never selected implicitly: a deployment keeps
+    running on the in-memory store until an operator makes an explicit,
+    documented choice to switch, and that switch is not part of this phase.
+    """
     store = InMemoryStore()
     return Container(
         store=store,
@@ -471,3 +508,25 @@ def build_container() -> Container:
         costs=InMemoryCostRepository(store),
         audit=InMemoryAuditRepository(store),
     )
+
+
+def build_container_for_settings(settings: object) -> Container:
+    """Select a container from configuration — in-memory unless explicitly opted in.
+
+    The in-memory store is returned when ``settings.database_url`` is unset, and
+    also when it is set: no runtime path enables PostgreSQL in this phase, so a
+    configured DSN is reported rather than acted on. Switching the runtime is a
+    deliberate, separately-approved step, not a side effect of an environment
+    variable.
+
+    The DSN's *presence* is checked, never its value, and no connection is
+    opened — building a container must not touch the network.
+    """
+    if getattr(settings, "database_url", None) is not None:
+        # Deliberately a warning, not a fallback that hides the situation: an
+        # operator who set DATABASE_URL expects to know it is not yet in use.
+        logger.warning(
+            "DATABASE_URL is set but the PostgreSQL runtime is not enabled in this "
+            "phase; continuing with the in-memory store"
+        )
+    return build_container()

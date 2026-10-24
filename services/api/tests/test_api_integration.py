@@ -12,9 +12,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.services.billing import BillingService
 from app.services.scan_runner import ScanJob, ScanWorkerPool
-from tests.fake_aws import FakeAwsAdapter, FakeAwsError
+from tests.fake_aws import FakeAwsError
 
 ROLE_ARN = "arn:aws:iam::123456789012:role/CloudPatrolReadOnly"
 ACCOUNT_ID = "123456789012"
@@ -42,43 +41,6 @@ def unattached_volume(volume_id: str = "vol-1") -> dict:
         "CreateTime": datetime.now(UTC),
         "Tags": [],
     }
-
-
-@pytest.fixture
-def org(client, alice_headers) -> str:  # type: ignore[no-untyped-def]
-    response = client.post(
-        "/api/v1/organizations",
-        headers=alice_headers,
-        json={"name": "Acme", "slug": "acme"},
-    )
-    assert response.status_code == 201, response.text
-    return response.json()["id"]
-
-
-@pytest.fixture
-def org_headers(alice_headers, org):  # type: ignore[no-untyped-def]
-    return {**alice_headers, "X-Organization-Id": org}
-
-
-@pytest.fixture
-def fake_adapter(app) -> FakeAwsAdapter:  # type: ignore[no-untyped-def]
-    """Install a fake AWS adapter on the running app.
-
-    Both the request path (account validation) and the worker path (scan
-    execution) resolve AWS through the connection service and the scan service,
-    so swapping those two covers the whole pipeline. The billing service is a
-    third holder of the adapter and is swapped too, or a scan would reach the
-    real Cost Explorer client.
-    """
-    adapter = FakeAwsAdapter()
-    app.state.aws_adapter = adapter
-    app.state.aws_connection_service._adapter = adapter  # noqa: SLF001
-    app.state.scan_service._adapter = adapter  # noqa: SLF001
-    # Rebuild the billing service around the fake, rather than mutating its
-    # internals, so a scan cannot reach the real Cost Explorer client.
-    if app.state.scan_service._billing is not None:  # noqa: SLF001
-        app.state.scan_service._billing = BillingService(adapter)
-    return adapter
 
 
 # --- account registration -----------------------------------------------

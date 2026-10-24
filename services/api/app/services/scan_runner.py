@@ -258,6 +258,38 @@ class ScanWorkerPool:
         """Jobs waiting to be picked up. Used by the readiness probe."""
         return self._queue.qsize()
 
+    @property
+    def capacity(self) -> int:
+        """Maximum number of queued jobs."""
+        return self._queue.maxsize
+
+    @property
+    def accepting(self) -> bool:
+        """Whether new work is still being accepted.
+
+        False during shutdown. Exposed so a probe can distinguish "the queue is
+        momentarily full" from "this process will never take more work".
+        """
+        return self._accepting
+
+    def metrics(self) -> dict[str, int | bool]:
+        """Capacity figures for the readiness probe and operators.
+
+        ``saturated`` is what an alert should fire on: a full queue means scans
+        are being refused, which is a customer-visible failure rather than a
+        slow path.
+        """
+        depth = self._queue.qsize()
+        capacity = self._queue.maxsize
+        return {
+            "queue_depth": depth,
+            "queue_capacity": capacity,
+            "queue_available": max(0, capacity - depth),
+            "saturated": depth >= capacity,
+            "accepting": self._accepting,
+            "worker_count": self._worker_count,
+        }
+
     def submit(self, job: ScanJob) -> None:
         """Queue a scan, or refuse it if the queue is full.
 

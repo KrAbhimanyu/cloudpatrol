@@ -94,6 +94,30 @@ class AwsConnectionService:
 
         return credentials, identity.arn, credentials.expiration
 
+    def revalidate_connection(
+        self,
+        *,
+        organization_id: str,
+        account_id: str,
+        role_arn: str,
+        external_id: str,
+        region: str,
+    ) -> tuple[AwsCredentials, str, datetime | None]:
+        """Re-assume a stored connection and confirm the identity still matches.
+
+        Same checks as :meth:`validate_connection`; kept as a named method
+        because the caller's intent differs — this one re-tests an existing
+        connection rather than vetting a new one, and the audit trail should
+        record that distinction.
+        """
+        return self.validate_connection(
+            organization_id=organization_id,
+            account_id=account_id,
+            role_arn=role_arn,
+            external_id=external_id,
+            region=region,
+        )
+
     def build_account_record(
         self,
         *,

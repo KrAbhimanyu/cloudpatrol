@@ -11,6 +11,10 @@ dependencies = [
     "boto3==1.43.118",
     "botocore==1.43.118",
     "PyJWT[crypto]==2.15.1",
+    # PostgreSQL driver. Phase A adds the dependency only; no connection is
+    # opened until a PostgreSQL repository exists. The `binary` extra ships a
+    # prebuilt libpq so no system package is required.
+    "psycopg[binary]==3.3.6",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +37,11 @@ include = ["app*"]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
 filterwarnings = ["error::DeprecationWarning"]
+# Integration tests need a disposable PostgreSQL server and are skipped unless
+# TEST_DATABASE_URL is set. `-m "not integration"` selects the unit suite alone.
+markers = [
+  "integration: needs a real PostgreSQL server (TEST_DATABASE_URL); skipped when unset",
+]
 
 [tool.ruff]
 line-length = 100

@@ -12,10 +12,10 @@
 import { useSession } from "@/lib/session-context";
 
 export function WorkspaceSwitcher() {
-  const { ready, token, organizations, organizationId, selectOrganization, signOut } =
+  const { ready, signedIn, organizations, organizationId, selectOrganization, signOut } =
     useSession();
 
-  if (!ready || !token || organizations.length === 0) return null;
+  if (!ready || !signedIn || organizations.length === 0) return null;
 
   return (
     <div className="space-y-2" data-testid="workspace-switcher">

@@ -1,15 +1,19 @@
 /**
  * API client for the CloudPatrol backend.
  *
- * Two behaviours are deliberate:
+ * Every call goes to this app's own `/api/proxy` route, not to the API host
+ * directly. The browser therefore never holds or sends a bearer token: the
+ * proxy route reads the HttpOnly session cookie and attaches the credential
+ * server-side. No token is stored in module scope or in `localStorage`.
  *
- * 1. Errors are never swallowed. A failed request surfaces as an ApiError
- *    carrying the server's code and message, so the UI can show why something
- *    failed instead of an empty table that looks like "no findings".
- * 2. The bearer token and organization ID are supplied per call by the
- *    caller. Nothing is cached in module scope, so one user's token can never
- *    be reused for another's request.
+ * Errors are never swallowed. A failed request surfaces as an `ApiError`
+ * carrying the server's code and message, so the UI can show why something
+ * failed instead of an empty table that looks like "no findings". A 401 is
+ * reported distinctly, because "your session ended" and "you have no data"
+ * must not look the same.
  */
+
+import { CSRF_COOKIE_NAME, CSRF_HEADER_NAME } from "./security/constants";
 
 import type {
   ApiErrorBody,
@@ -47,33 +51,75 @@ export class ApiError extends Error {
     this.details = details;
     this.requestId = requestId;
   }
+
+  /** True when the server rejected the session, not the request. */
+  get isUnauthenticated(): boolean {
+    return this.status === 401;
+  }
 }
 
 export interface RequestOptions {
-  token: string;
   organizationId?: string;
   signal?: AbortSignal;
 }
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const PROXY_BASE = "/api/proxy";
+
+/** Methods that need the CSRF token. Mirrors the server-side check. */
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * Read the CSRF token the proxy placed in a non-HttpOnly cookie.
+ *
+ * Read on each call rather than cached: the token is rotated by the proxy, and
+ * a cached value would go stale and start failing the check. A missing cookie
+ * yields an empty string, and the request is still sent so the server can
+ * return its own 403 rather than the client inventing a failure.
+ */
+function csrfToken(): string {
+  if (typeof document === "undefined") return "";
+  const prefix = `${CSRF_COOKIE_NAME}=`;
+  for (const part of document.cookie.split("; ")) {
+    if (part.startsWith(prefix)) {
+      return decodeURIComponent(part.slice(prefix.length));
+    }
+  }
+  return "";
+}
 
 async function request<T>(
   path: string,
-  options: RequestOptions,
+  options: RequestOptions = {},
   init: RequestInit = {},
 ): Promise<T> {
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${options.token}`,
     "Content-Type": "application/json",
     ...((init.headers as Record<string, string>) ?? {}),
   };
+  // The active workspace. Not a secret: FastAPI verifies membership, so a
+  // tampered value yields 403 rather than another tenant's data.
   if (options.organizationId) {
     headers["X-Organization-Id"] = options.organizationId;
+  }
+  // Double-submit CSRF token. A cross-site request cannot set this header, so
+  // its absence or mismatch is what the server rejects. An empty value is
+  // omitted rather than sent, so the server sees a missing header and says so.
+  const method = (init.method ?? "GET").toUpperCase();
+  if (UNSAFE_METHODS.has(method)) {
+    const token = csrfToken();
+    if (token) headers[CSRF_HEADER_NAME] = token;
   }
 
   let response: Response;
   try {
-    response = await fetch(`${BASE_URL}${path}`, { ...init, headers, signal: options.signal });
+    response = await fetch(`${PROXY_BASE}${path}`, {
+      ...init,
+      headers,
+      signal: options.signal,
+      // The session is per-user; a cached response must never be reused.
+      cache: "no-store",
+      credentials: "same-origin",
+    });
   } catch (cause) {
     // A transport failure is reported as such; it must not be mistaken for an
     // empty result set.
@@ -92,7 +138,20 @@ async function request<T>(
   }
 
   const text = await response.text();
-  const payload: unknown = text ? JSON.parse(text) : null;
+  let payload: unknown = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      // A non-JSON body (an HTML error page from a proxy, say) must not crash
+      // the client with a parse error.
+      throw new ApiError(
+        `The API returned an unreadable response (status ${response.status}).`,
+        response.status,
+        "invalid_response",
+      );
+    }
+  }
 
   if (!response.ok) {
     const body = payload as ApiErrorBody | null;
@@ -109,17 +168,17 @@ async function request<T>(
 }
 
 export const api = {
-  listOrganizations: (options: RequestOptions): Promise<Paginated<Organization>> =>
-    request("/api/v1/organizations", options),
+  listOrganizations: (options: RequestOptions = {}): Promise<Paginated<Organization>> =>
+    request("/organizations", options),
 
   createOrganization: (
     options: RequestOptions,
     body: { name: string; slug: string },
   ): Promise<Organization> =>
-    request("/api/v1/organizations", options, { method: "POST", body: JSON.stringify(body) }),
+    request("/organizations", options, { method: "POST", body: JSON.stringify(body) }),
 
-  listAccounts: (options: RequestOptions): Promise<Paginated<AwsAccount>> =>
-    request("/api/v1/aws/accounts", options),
+  listAccounts: (options: RequestOptions = {}): Promise<Paginated<AwsAccount>> =>
+    request("/aws/accounts", options),
 
   connectAccount: (
     options: RequestOptions,
@@ -131,16 +190,16 @@ export const api = {
       regions: string[];
     },
   ): Promise<AwsAccount> =>
-    request("/api/v1/aws/accounts", options, { method: "POST", body: JSON.stringify(body) }),
+    request("/aws/accounts", options, { method: "POST", body: JSON.stringify(body) }),
 
-  listScans: (options: RequestOptions): Promise<Paginated<Scan>> =>
-    request("/api/v1/scans", options),
+  listScans: (options: RequestOptions = {}): Promise<Paginated<Scan>> =>
+    request("/scans", options),
 
   startScan: (options: RequestOptions, body: { aws_account_id: string }): Promise<Scan> =>
-    request("/api/v1/scans", options, { method: "POST", body: JSON.stringify(body) }),
+    request("/scans", options, { method: "POST", body: JSON.stringify(body) }),
 
   getScan: (options: RequestOptions, scanId: string): Promise<Scan> =>
-    request(`/api/v1/scans/${encodeURIComponent(scanId)}`, options),
+    request(`/scans/${encodeURIComponent(scanId)}`, options),
 
   listFindings: (
     options: RequestOptions,
@@ -150,24 +209,24 @@ export const api = {
     if (filters.state) params.set("state", filters.state);
     if (filters.aws_account_id) params.set("aws_account_id", filters.aws_account_id);
     const query = params.toString();
-    return request(`/api/v1/findings${query ? `?${query}` : ""}`, options);
+    return request(`/findings${query ? `?${query}` : ""}`, options);
   },
 
   getFinding: (options: RequestOptions, findingId: string): Promise<Finding> =>
-    request(`/api/v1/findings/${encodeURIComponent(findingId)}`, options),
+    request(`/findings/${encodeURIComponent(findingId)}`, options),
 
   reviewFinding: (
     options: RequestOptions,
     findingId: string,
     body: { state: "acknowledged" | "dismissed"; note?: string },
   ): Promise<Finding> =>
-    request(`/api/v1/findings/${encodeURIComponent(findingId)}`, options, {
+    request(`/findings/${encodeURIComponent(findingId)}`, options, {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
 
-  savingsLedger: (options: RequestOptions): Promise<SavingsLedger> =>
-    request("/api/v1/savings/ledger", options),
+  savingsLedger: (options: RequestOptions = {}): Promise<SavingsLedger> =>
+    request("/savings/ledger", options),
 
   advanceSavings: (
     options: RequestOptions,
@@ -181,7 +240,7 @@ export const api = {
       note?: string;
     },
   ): Promise<SavingsEntry> =>
-    request(`/api/v1/savings/findings/${encodeURIComponent(findingId)}/advance`, options, {
+    request(`/savings/findings/${encodeURIComponent(findingId)}/advance`, options, {
       method: "POST",
       body: JSON.stringify(body),
     }),
@@ -193,6 +252,6 @@ export const api = {
     const params = new URLSearchParams();
     if (filters.aws_account_id) params.set("aws_account_id", filters.aws_account_id);
     const query = params.toString();
-    return request(`/api/v1/costs/summary${query ? `?${query}` : ""}`, options);
+    return request(`/costs/summary${query ? `?${query}` : ""}`, options);
   },
 };

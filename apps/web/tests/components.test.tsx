@@ -15,12 +15,13 @@ import type { Finding, Scan } from "@/lib/types";
 
 /**
  * FindingCard reads the session for its review actions, so it is rendered
- * inside the provider here exactly as it is in the app. With no stored token
- * the provider resolves to "signed out", which is enough for the read-only
- * assertions below.
+ * inside the provider here exactly as it is in the app. The provider is given
+ * a signed-in identity but the network is never called for these read-only
+ * assertions, so the review buttons stay disabled.
  */
-function render(ui: React.ReactElement) {
-  return rtlRender(<SessionProvider>{ui}</SessionProvider>);
+function render(ui: React.ReactElement, signedIn = false) {
+  const initialIdentity = signedIn ? { userId: "user-1", email: "a@example.com" } : null;
+  return rtlRender(<SessionProvider initialIdentity={initialIdentity}>{ui}</SessionProvider>);
 }
 
 const baseFinding: Finding = {

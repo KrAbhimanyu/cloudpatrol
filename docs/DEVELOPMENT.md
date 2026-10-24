@@ -80,8 +80,8 @@ re-applying it is safe and does not error.
 
 ## Environment
 
-Copy `.env.example` to `.env`. It documents variable names only and contains no
-values. Two things about it are deliberate:
+Copy `.env.example` to `.env`. It documents variable names and shows
+non-functional placeholders. Two things about it are deliberate:
 
 - There is no `AWS_ACCESS_KEY_ID`. CloudPatrol uses cross-account roles with
   temporary credentials, so there is nowhere for a static key to go.

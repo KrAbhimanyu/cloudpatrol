@@ -20,10 +20,10 @@ export default function SettingsPage() {
 }
 
 function SettingsContent() {
-  const { organizations, organizationId, token } = useSession();
+  const { organizations, organizationId, signedIn } = useSession();
   const current = organizations.find((org) => org.id === organizationId) ?? null;
 
-  if (!token) return <LoadingState label="Loading session…" />;
+  if (!signedIn) return <LoadingState label="Loading session…" />;
   if (!current) return <LoadingState label="Loading workspace…" />;
 
   return (

@@ -234,37 +234,56 @@ function DashboardContent() {
           {costs.data.by_service.length === 0 ? (
             <p className="text-sm text-slate-500">No cost observations recorded yet.</p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <caption className="sr-only">Reported spend by service</caption>
-                <thead>
-                  <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
-                    <th scope="col" className="py-2 pr-4 font-medium">
-                      Service
-                    </th>
-                    <th scope="col" className="py-2 pr-4 font-medium">
-                      Amount
-                    </th>
-                    <th scope="col" className="py-2 font-medium">
-                      Period
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {costs.data.by_service.map((row) => (
-                    <tr key={row.id}>
-                      <td className="py-2 pr-4 text-slate-800">{row.service}</td>
-                      <td className="py-2 pr-4 tabular-nums text-slate-900">
-                        {formatMoney(row.amount, row.currency)}
-                      </td>
-                      <td className="py-2 text-xs text-slate-600">
-                        {row.period_start} → {row.period_end}
-                      </td>
+            <>
+              {/* The total covers one period and one currency only. When the
+                  API withholds it (mixed currencies), the label says so rather
+                  than showing a number that matches no invoice. */}
+              <p className="mb-3 text-sm text-slate-600">
+                {costs.data.total_amount === null ? (
+                  <span className="text-amber-700">
+                    Total unavailable: observations span multiple currencies.
+                  </span>
+                ) : (
+                  <>
+                    Latest period total:{" "}
+                    <span className="font-semibold tabular-nums text-slate-900">
+                      {formatMoney(costs.data.total_amount, costs.data.currency)}
+                    </span>
+                  </>
+                )}
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <caption className="sr-only">Reported spend by service</caption>
+                  <thead>
+                    <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
+                      <th scope="col" className="py-2 pr-4 font-medium">
+                        Service
+                      </th>
+                      <th scope="col" className="py-2 pr-4 font-medium">
+                        Amount
+                      </th>
+                      <th scope="col" className="py-2 font-medium">
+                        Period
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {costs.data.by_service.map((row) => (
+                      <tr key={row.id}>
+                        <td className="py-2 pr-4 text-slate-800">{row.service}</td>
+                        <td className="py-2 pr-4 tabular-nums text-slate-900">
+                          {formatMoney(row.amount, row.currency)}
+                        </td>
+                        <td className="py-2 text-xs text-slate-600">
+                          {row.period_start} → {row.period_end}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </Card>
       )}

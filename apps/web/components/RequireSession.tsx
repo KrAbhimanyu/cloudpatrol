@@ -1,31 +1,53 @@
 "use client";
 
 /**
- * Sign-in gate and session status.
+ * Session gate and workspace guard.
  *
- * Two responsibilities, both about honesty:
+ * There is no token-entry form here any more. Sign-in happens on its own page
+ * against Supabase Auth; this component only decides what to render given the
+ * session the server already established.
  *
- * 1. If there is no session, show a form that takes a token rather than
- *    rendering an empty page that would read as "no findings".
- * 2. If there is a session but no organization yet, say so, because every data
- *    page needs one and an empty dashboard would otherwise look like "no
- *    findings" rather than "no workspace selected".
+ * It still refuses to render a data page it cannot back with a workspace,
+ * because an empty dashboard is indistinguishable from "no findings" and that
+ * would be a lie about the customer's account.
  */
 
-import { useState } from "react";
+import Link from "next/link";
 
 import { useSession } from "@/lib/session-context";
 
 export function RequireSession({ children }: { children: React.ReactNode }) {
-  const { ready, token, organizationId, organizations, loadingOrganizations, error } =
-    useSession();
+  const {
+    ready,
+    signedIn,
+    sessionExpired,
+    organizationId,
+    organizations,
+    loadingOrganizations,
+    error,
+    signOut,
+  } = useSession();
 
   if (!ready) {
     return <CenteredMessage>Loading…</CenteredMessage>;
   }
 
-  if (!token) {
-    return <SignInForm />;
+  if (!signedIn) {
+    return (
+      <CenteredMessage tone={sessionExpired ? "error" : "neutral"}>
+        {sessionExpired
+          ? "Your session has ended. Sign in again to continue."
+          : "You are not signed in."}
+        <div className="mt-4">
+          <Link
+            href="/sign-in"
+            className="text-xs font-semibold text-brand-700 hover:underline"
+          >
+            Go to sign in
+          </Link>
+        </div>
+      </CenteredMessage>
+    );
   }
 
   if (loadingOrganizations && organizations.length === 0) {
@@ -36,7 +58,7 @@ export function RequireSession({ children }: { children: React.ReactNode }) {
     return (
       <CenteredMessage tone="error">
         {error}
-        <SignOutLink />
+        <SignOutButton onClick={signOut} />
       </CenteredMessage>
     );
   }
@@ -45,7 +67,7 @@ export function RequireSession({ children }: { children: React.ReactNode }) {
     return (
       <CenteredMessage>
         This account does not belong to any workspace yet.
-        <SignOutLink />
+        <SignOutButton onClick={signOut} />
       </CenteredMessage>
     );
   }
@@ -78,62 +100,16 @@ function CenteredMessage({
   );
 }
 
-function SignOutLink() {
-  const { signOut } = useSession();
+function SignOutButton({ onClick }: { onClick: () => void }) {
   return (
     <div className="mt-4">
       <button
         type="button"
-        onClick={signOut}
+        onClick={onClick}
         className="text-xs font-semibold text-brand-700 hover:underline"
       >
-        Use a different token
+        Sign out
       </button>
-    </div>
-  );
-}
-
-function SignInForm() {
-  const { signIn } = useSession();
-  const [value, setValue] = useState("");
-
-  return (
-    <div className="mx-auto mt-16 max-w-md rounded-xl border border-slate-200 bg-white px-6 py-8 shadow-sm">
-      <h1 className="text-lg font-semibold tracking-tight text-slate-900">
-        Connect to CloudPatrol
-      </h1>
-      <p className="mt-1.5 text-sm text-slate-600">
-        Paste an API token to load your workspaces. The token is sent as a bearer
-        credential and is stored only in this browser.
-      </p>
-      <form
-        className="mt-5"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const trimmed = value.trim();
-          if (trimmed) signIn(trimmed);
-        }}
-      >
-        <label htmlFor="token" className="block text-xs font-medium text-slate-700">
-          API token
-        </label>
-        <input
-          id="token"
-          name="token"
-          type="password"
-          autoComplete="off"
-          value={value}
-          onChange={(event) => setValue(event.target.value)}
-          className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-        />
-        <button
-          type="submit"
-          disabled={value.trim().length === 0}
-          className="mt-4 w-full rounded-md bg-brand-600 px-3 py-2 text-sm font-semibold text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Continue
-        </button>
-      </form>
     </div>
   );
 }

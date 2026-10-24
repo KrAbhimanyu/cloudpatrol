@@ -32,12 +32,25 @@ async def readiness(request: Request) -> dict[str, object]:
     """
     settings = request.app.state.settings
     missing = settings.missing_required_for_runtime()
+
+    # Scan queue capacity. A full queue refuses new scans, which is a real
+    # degradation, so it is reported here rather than only in logs. The pool may
+    # be absent if the app was built without a lifespan (a unit test), hence the
+    # guard.
+    pool = getattr(request.app.state, "scan_pool", None)
+    queue = pool.metrics() if pool is not None else {}
+
+    status = "ready" if not missing else "degraded"
+    if queue.get("saturated"):
+        status = "degraded"
+
     return {
-        "status": "ready" if not missing else "degraded",
+        "status": status,
         "checks": {
             "database_configured": bool(settings.supabase_url),
             "auth_configured": bool(settings.supabase_jwt_secret or settings.supabase_url),
             "aws_adapter": "boto3",
+            "scan_queue": queue,
         },
         "missing_configuration": missing,
     }

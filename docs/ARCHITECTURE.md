@@ -23,6 +23,9 @@ policy it asks customers to attach grants no permission to do so.
 ```mermaid
 flowchart LR
     Browser["Browser<br/>Next.js dashboard"]
+    Auth["Supabase Auth"]
+    Proxy["BFF proxy<br/>/api/proxy/*"]
+    Cookie[("HttpOnly session cookie")]
     API["FastAPI service"]
     Verifier["Token verifier<br/>Supabase JWT"]
     Authz["Organization context<br/>membership check"]
@@ -32,7 +35,11 @@ flowchart LR
     AWS["AWS read-only APIs<br/>EC2, CloudWatch, CE"]
     DB[("PostgreSQL<br/>RLS enforced")]
 
-    Browser -->|"Bearer token"| API
+    Browser -->|"email + password"| Auth
+    Auth -->|"session cookie (HttpOnly)"| Cookie
+    Browser -->|"same-origin fetch"| Proxy
+    Cookie --> Proxy
+    Proxy -->|"Bearer token, attached server-side"| API
     API --> Verifier
     Verifier --> Authz
     Authz --> Scan
@@ -44,7 +51,9 @@ flowchart LR
     Scan --> DB
 ```
 
-The browser never talks to AWS and never holds AWS credentials. The token
+The browser never talks to AWS, never holds AWS credentials, and never holds the
+Supabase access token: the token lives only in an HttpOnly cookie and is turned
+into an `Authorization` header by the BFF proxy on the server. The token
 verifier establishes *who* is calling; the organization context establishes
 *what they may see*.
 
@@ -53,11 +62,16 @@ verifier establishes *who* is calling; the organization context establishes
 ### 1. Presentation
 
 `apps/web`. Pages are client components that read the active workspace from a
-`useSyncExternalStore` session store (`lib/session.ts`) and fetch through the
-API client in `apps/web/lib/api.ts`, which carries the bearer token per call and
-never caches it in module scope. `lib/use-async.ts` gives every page the same
-four states — loading, error, empty, loaded — so a failed request renders as a
-failure rather than as an empty list.
+`useSyncExternalStore` store (`lib/session.ts`) and fetch through the API client
+in `apps/web/lib/api.ts`, which calls same-origin `/api/proxy/*` and never holds
+a credential. `lib/use-async.ts` gives every page the same four states —
+loading, error, empty, loaded — so a failed request renders as a failure rather
+than as an empty list.
+
+Sign-in is at `/sign-in` and runs through a server action
+(`lib/auth/actions.ts`). The session gate (`components/RequireSession.tsx`)
+renders the signed-in state from the identity the server layout resolved, so a
+user never sees a sign-in flash they do not need.
 
 The UI states its own uncertainty explicitly:
 
@@ -69,13 +83,23 @@ The UI states its own uncertainty explicitly:
 - Every figure is fetched from the API for the active workspace. A request that
   fails is shown as a failure (`components/ui.tsx` `ErrorState`), never as an
   empty result, so a broken connection cannot read as a clean account.
+- A `401` from the API flips the session to signed-out and says the session
+  ended, rather than rendering an empty dashboard that looks like a clean
+  account.
 
 ### 2. Identity and organization authorization
+
+`lib/supabase/server.ts` owns the session. `@supabase/ssr` writes it to an
+HttpOnly cookie; the app never parses or stores a token itself. `proxy.ts`
+refreshes the session on each page request and guards the protected routes.
+`app/api/proxy/[...path]/route.ts` is the only place a token is turned into a
+header.
 
 `app/core/security.py` verifies Supabase-issued JWTs. HS256 tokens are checked
 against the shared secret; RS256/ES256 tokens are checked against the project's
 JWKS endpoint. Any other algorithm — including `none` — is refused, which is
-what prevents a forged-token bypass.
+what prevents a forged-token bypass. `exp`, `sub`, `aud` and `iss` are required,
+and the issuer is pinned to the configured project when `SUPABASE_URL` is set.
 
 `app/core/dependencies.py` resolves the caller's membership in the requested
 organization. The caller cannot assert an organization; it must be a member.
@@ -125,6 +149,24 @@ Every call is bounded by a connect timeout, a read timeout, and a retry budget
 for throttling only. Throttling is retried with exponential backoff; a
 permission error is not retried, because retrying it cannot help.
 
+`sts:AssumeRole` is translated separately from a read call
+(`translate_assume_role_error`). An `AccessDenied` on `AssumeRole` is a trust
+policy or external ID problem rather than a data-permission problem, and AWS
+reports both with the same code, so the distinction is made where the AWS
+message is still available. The AWS message is never forwarded to the client:
+it echoes the role ARN and the external ID it received.
+
+`POST /api/v1/aws/accounts/{id}/validate` performs a real `AssumeRole` followed
+by `GetCallerIdentity` using the external ID from the vault. It reports the
+resulting session expiry, and a failure marks the stored connection `failed`
+rather than leaving it claiming to be `validated`. The external ID is never
+returned.
+
+**Regions are constrained by `aws_allowed_regions`.** The list is enforced when
+an account is connected, not merely documented: a region outside it is rejected
+before any AWS call is made. A scan makes outbound calls per configured region,
+so an unbounded list is both a cost and an operational risk.
+
 ### 6. Data ingestion and normalization
 
 Resources are normalized into `ResourceSnapshotRecord` before detectors run.
@@ -146,6 +188,13 @@ target cannot be priced, and inventing a number would be worse than reporting
 none. `estimated_monthly_savings` is therefore nullable, and null is
 distinguished from zero at every layer, including the database
 (`numeric(14,2)` with no default and no `not null`).
+
+Reported spend is read from Cost Explorer grouped by service, with
+pagination followed to the last page. A "total" is only reported within one
+currency and one billing period: summing several months would produce a figure
+matching no invoice, so the latest period is the one totalled and observations
+outside it are excluded. If a single period contains more than one currency the
+total is withheld and the rows are still returned.
 
 Pricing comes from a built-in price book (`app/services/pricing.py`). The
 values in it are **placeholders for us-east-1 on-demand rates**, not a live AWS

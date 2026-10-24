@@ -76,6 +76,8 @@ class UnattachedEbsVolumeDetector:
                     age_days = None
 
             evidence: dict[str, object] = {
+                "evidence_source": "ec2:DescribeVolumes (volume State and Attachments)",
+                "observation_window": "point-in-time at scan execution",
                 "volume_state": resource.state,
                 "size_gb": size_gb,
                 "volume_type": volume_type,

@@ -41,7 +41,7 @@ export function ConnectAccountForm({
 }: {
   onConnected?: (account: AwsAccount) => void;
 }) {
-  const { token, organizationId } = useSession();
+  const { signedIn, organizationId } = useSession();
   const [label, setLabel] = useState("");
   const [accountId, setAccountId] = useState("");
   const [roleArn, setRoleArn] = useState("");
@@ -83,7 +83,7 @@ export function ConnectAccountForm({
     setErrors(found);
     setResult(null);
     if (Object.keys(found).length > 0) return;
-    if (!token || !organizationId) {
+    if (!signedIn || !organizationId) {
       setResult({ ok: false, message: "Select a workspace before connecting an account." });
       return;
     }
@@ -91,7 +91,7 @@ export function ConnectAccountForm({
     setSubmitting(true);
     try {
       const account = await api.connectAccount(
-        { token, organizationId },
+        { organizationId },
         {
           label: label.trim(),
           account_id: accountId,

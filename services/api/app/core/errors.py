@@ -23,6 +23,12 @@ class ErrorCode(StrEnum):
     RATE_LIMITED = "rate_limited"
     AWS_ASSUME_ROLE_FAILED = "aws_assume_role_failed"
     AWS_PERMISSION_DENIED = "aws_permission_denied"
+    # AssumeRole failures that need distinct advice. AWS reports a wrong
+    # external ID, a missing trust relationship and a nonexistent role in ways
+    # that a single "permission denied" code cannot separate, and the fix for
+    # each is different.
+    AWS_EXTERNAL_ID_INVALID = "aws_external_id_invalid"
+    AWS_ROLE_NOT_FOUND = "aws_role_not_found"
     AWS_THROTTLED = "aws_throttled"
     AWS_TIMEOUT = "aws_timeout"
     AWS_ACCOUNT_MISMATCH = "aws_account_mismatch"

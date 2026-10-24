@@ -1,9 +1,10 @@
 /**
  * Tests for the API client.
  *
- * The behaviours that matter: server error messages reach the caller intact,
- * a transport failure is distinguishable from an empty result, the
- * organization header is only sent when known, and no token is cached.
+ * The behaviours that matter: calls go to the same-origin proxy rather than to
+ * the API host, the client never attaches a credential, server error messages
+ * reach the caller intact, and a transport failure is distinguishable from an
+ * empty result.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -28,37 +29,64 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-describe("api.listOrganizations", () => {
-  it("sends the bearer token", async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0 }));
-    await api.listOrganizations({ token: "tok-123" });
+function lastCall(): { url: string; init: RequestInit } {
+  const [url, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+  return { url, init };
+}
 
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    const headers = init.headers as Record<string, string>;
-    expect(headers.Authorization).toBe("Bearer tok-123");
+describe("proxy routing", () => {
+  it("calls the same-origin proxy, not the API host", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0 }));
+    await api.listOrganizations({});
+
+    // The browser must never talk to the API directly: that is what allows the
+    // token to stay in an HttpOnly cookie.
+    expect(lastCall().url).toBe("/api/proxy/organizations");
   });
 
-  it("does not send an organization header when none is supplied", async () => {
+  it("never sends an Authorization header from the client", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0 }));
-    await api.listOrganizations({ token: "tok-123" });
+    await api.listOrganizations({ organizationId: "org-9" });
 
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect((init.headers as Record<string, string>)["X-Organization-Id"]).toBeUndefined();
+    const headers = lastCall().init.headers as Record<string, string>;
+    // If this ever appears, the token has leaked back into client JavaScript.
+    expect(headers.Authorization).toBeUndefined();
+    for (const key of Object.keys(headers)) {
+      expect(key.toLowerCase()).not.toBe("authorization");
+    }
   });
 
   it("sends the organization header when supplied", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0 }));
-    await api.listOrganizations({ token: "tok-123", organizationId: "org-9" });
-
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect((init.headers as Record<string, string>)["X-Organization-Id"]).toBe("org-9");
+    await api.listOrganizations({ organizationId: "org-9" });
+    expect((lastCall().init.headers as Record<string, string>)["X-Organization-Id"]).toBe("org-9");
   });
 
+  it("does not send an organization header when none is supplied", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0 }));
+    await api.listOrganizations({});
+    expect((lastCall().init.headers as Record<string, string>)["X-Organization-Id"]).toBeUndefined();
+  });
+
+  it("sends same-origin credentials so the session cookie travels", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0 }));
+    await api.listOrganizations({});
+    expect(lastCall().init.credentials).toBe("same-origin");
+  });
+
+  it("never caches a per-user response", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0 }));
+    await api.listOrganizations({});
+    expect(lastCall().init.cache).toBe("no-store");
+  });
+});
+
+describe("api.listOrganizations", () => {
   it("returns the parsed body", async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({ items: [{ id: "o1", name: "Acme", slug: "acme", role: "owner" }], total: 1 }),
     );
-    const result = await api.listOrganizations({ token: "t" });
+    const result = await api.listOrganizations({});
     expect(result.total).toBe(1);
     expect(result.items[0]?.name).toBe("Acme");
   });
@@ -68,135 +96,158 @@ describe("error handling", () => {
   it("surfaces the server error message and code", async () => {
     fetchMock.mockResolvedValue(
       jsonResponse(
-        { error: { code: "forbidden", message: "You are not a member of this workspace." } },
+        {
+          error: {
+            code: "forbidden",
+            message: "You are not a member of that organization.",
+            details: {},
+            request_id: "req-1",
+          },
+        },
         403,
       ),
     );
 
-    await expect(api.listOrganizations({ token: "t" })).rejects.toThrow(
-      "You are not a member of this workspace.",
-    );
+    await expect(api.listOrganizations({ organizationId: "org-9" })).rejects.toMatchObject({
+      status: 403,
+      code: "forbidden",
+      message: "You are not a member of that organization.",
+    });
   });
 
-  it("exposes the status and code on the error", async () => {
+  it("marks a 401 as an authentication failure", async () => {
     fetchMock.mockResolvedValue(
-      jsonResponse({ error: { code: "forbidden", message: "nope" } }, 403),
+      jsonResponse(
+        { error: { code: "unauthenticated", message: "Session ended.", details: {} } },
+        401,
+      ),
     );
 
-    try {
-      await api.listOrganizations({ token: "t" });
-      throw new Error("should have thrown");
-    } catch (error) {
-      expect(error).toBeInstanceOf(ApiError);
-      const apiError = error as ApiError;
-      expect(apiError.status).toBe(403);
-      expect(apiError.code).toBe("forbidden");
-    }
+    const failure = await api.listOrganizations({}).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).isUnauthenticated).toBe(true);
   });
 
-  it("reports a transport failure distinctly from an empty result", async () => {
-    // This distinction matters: an unreachable API must not render as
-    // "no findings".
+  it("reports a transport failure as a network error, not as empty data", async () => {
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
 
-    await expect(api.listOrganizations({ token: "t" })).rejects.toThrow(/Could not reach/);
-    try {
-      await api.listOrganizations({ token: "t" });
-    } catch (error) {
-      expect((error as ApiError).code).toBe("network_error");
-      expect((error as ApiError).status).toBe(0);
-    }
+    const failure = await api.listOrganizations({}).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).code).toBe("network_error");
+    // Status 0 marks "never reached the server", which is distinct from 4xx/5xx.
+    expect((failure as ApiError).status).toBe(0);
   });
 
-  it("includes the request id from the error body", async () => {
+  it("does not crash on a non-JSON error body", async () => {
     fetchMock.mockResolvedValue(
-      jsonResponse(
-        { error: { code: "internal_error", message: "boom", request_id: "req-42" } },
-        500,
-      ),
+      new Response("<html>Bad gateway</html>", {
+        status: 502,
+        headers: { "Content-Type": "text/html" },
+      }),
     );
 
-    try {
-      await api.listOrganizations({ token: "t" });
-    } catch (error) {
-      expect((error as ApiError).requestId).toBe("req-42");
-    }
+    const failure = await api.listOrganizations({}).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).code).toBe("invalid_response");
+  });
+
+  it("keeps the underlying cause for debugging", async () => {
+    const cause = new TypeError("Failed to fetch");
+    fetchMock.mockRejectedValue(cause);
+
+    const failure = (await api.listOrganizations({}).catch((e: unknown) => e)) as ApiError;
+    expect((failure as Error & { cause?: unknown }).cause).toBe(cause);
   });
 });
 
-describe("api.startScan", () => {
-  it("posts the account id and accepts a queued scan", async () => {
-    // The API accepts the job with 202 and returns it queued; the client polls
-    // getScan for the outcome.
-    fetchMock.mockResolvedValue(jsonResponse({ id: "s1", status: "queued" }, 202));
-    await api.startScan({ token: "t", organizationId: "o1" }, { aws_account_id: "acct-1" });
+describe("mutations", () => {
+  it("sends a POST body to the proxied path", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: "s1" }));
+    await api.startScan({ organizationId: "org-1" }, { aws_account_id: "a1" });
 
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toContain("/api/v1/scans");
+    const { url, init } = lastCall();
+    expect(url).toBe("/api/proxy/scans");
     expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body as string)).toEqual({ aws_account_id: "acct-1" });
-  });
-
-  it("surfaces a conflict when a scan is already running", async () => {
-    fetchMock.mockResolvedValue(
-      jsonResponse(
-        {
-          error: {
-            code: "conflict",
-            message: "A scan for this account is already in progress.",
-            details: { scan_id: "s-existing" },
-          },
-        },
-        409,
-      ),
-    );
-
-    try {
-      await api.startScan({ token: "t" }, { aws_account_id: "acct-1" });
-      throw new Error("should have thrown");
-    } catch (error) {
-      const apiError = error as ApiError;
-      expect(apiError.status).toBe(409);
-      expect(apiError.details.scan_id).toBe("s-existing");
-    }
-  });
-});
-
-describe("api.reviewFinding", () => {
-  it("patches the finding state", async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ id: "f1", state: "acknowledged" }));
-    await api.reviewFinding({ token: "t" }, "f1", { state: "acknowledged", note: "ok" });
-
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toContain("/api/v1/findings/f1");
-    expect(init.method).toBe("PATCH");
-    expect(JSON.parse(init.body as string)).toEqual({ state: "acknowledged", note: "ok" });
+    expect(init.body).toBe(JSON.stringify({ aws_account_id: "a1" }));
   });
 
   it("encodes identifiers placed in the path", async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ id: "x" }));
-    await api.getFinding({ token: "t" }, "id/with/slash");
+    fetchMock.mockResolvedValue(jsonResponse({ id: "s1" }));
+    await api.getFinding({ organizationId: "org-1" }, "id/with/slash");
 
-    const [url] = fetchMock.mock.calls[0] as [string];
-    expect(url).toContain("id%2Fwith%2Fslash");
+    expect(lastCall().url).toBe("/api/proxy/findings/id%2Fwith%2Fslash");
+  });
+
+  it("builds a query string for filters", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0 }));
+    await api.listFindings({ organizationId: "org-1" }, { state: "estimated" });
+
+    expect(lastCall().url).toBe("/api/proxy/findings?state=estimated");
+  });
+
+  it("returns undefined for a 204 response", async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
+    await expect(api.listOrganizations({})).resolves.toBeUndefined();
   });
 });
 
-describe("api.listFindings", () => {
-  it("builds a query string from filters", async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0 }));
-    await api.listFindings({ token: "t" }, { state: "estimated", aws_account_id: "a1" });
+describe("CSRF token", () => {
+  const TOKEN = "csrf-token-value";
 
-    const [url] = fetchMock.mock.calls[0] as [string];
-    expect(url).toContain("state=estimated");
-    expect(url).toContain("aws_account_id=a1");
+  function withCsrfCookie(value = TOKEN) {
+    vi.stubGlobal("document", { cookie: `other=1; cloudpatrol.csrf=${value}; another=2` });
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
-  it("sends no query string when there are no filters", async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0 }));
-    await api.listFindings({ token: "t" });
+  it("sends the token from the cookie on a POST", async () => {
+    withCsrfCookie();
+    fetchMock.mockResolvedValue(jsonResponse({ id: "s1" }));
 
-    const [url] = fetchMock.mock.calls[0] as [string];
-    expect(url.endsWith("/api/v1/findings")).toBe(true);
+    await api.startScan({ organizationId: "org-1" }, { aws_account_id: "a1" });
+
+    const headers = lastCall().init.headers as Record<string, string>;
+    expect(headers["x-csrf-token"]).toBe(TOKEN);
+  });
+
+  it("sends the token on PATCH and DELETE", async () => {
+    withCsrfCookie();
+    fetchMock.mockResolvedValue(jsonResponse({ id: "f1" }));
+    await api.reviewFinding({}, "f1", { state: "dismissed" });
+    expect((lastCall().init.headers as Record<string, string>)["x-csrf-token"]).toBe(TOKEN);
+  });
+
+  it("does not send the token on a GET, which needs none", async () => {
+    withCsrfCookie();
+    fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0 }));
+
+    await api.listOrganizations({});
+
+    const headers = lastCall().init.headers as Record<string, string>;
+    expect(headers["x-csrf-token"]).toBeUndefined();
+  });
+
+  it("omits the header when the cookie is absent, rather than sending an empty value", async () => {
+    vi.stubGlobal("document", { cookie: "other=1" });
+    fetchMock.mockResolvedValue(jsonResponse({ id: "s1" }));
+
+    await api.startScan({}, { aws_account_id: "a1" });
+
+    const headers = lastCall().init.headers as Record<string, string>;
+    // The server reports a missing header distinctly from a mismatch; an empty
+    // string would blur the two.
+    expect(headers["x-csrf-token"]).toBeUndefined();
+  });
+
+  it("url-decodes the cookie value", async () => {
+    withCsrfCookie("a%2Bb");
+    fetchMock.mockResolvedValue(jsonResponse({ id: "s1" }));
+
+    await api.startScan({}, { aws_account_id: "a1" });
+
+    expect((lastCall().init.headers as Record<string, string>)["x-csrf-token"]).toBe("a+b");
   });
 });
+

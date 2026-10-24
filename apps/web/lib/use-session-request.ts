@@ -3,10 +3,13 @@
 /**
  * Session-bound data access.
  *
- * Pages should not each rebuild `{ token, organizationId }` and remember to
- * guard against a missing session. This hook centralises that: it returns the
- * request options plus a `ready` flag, so a page can render a loading state
- * instead of firing a request with an empty token.
+ * Pages should not each rebuild `{ organizationId }` and remember to guard
+ * against a missing session. This hook centralises that: it returns the
+ * request options plus a `ready` flag, so a page renders a loading state
+ * instead of firing a request with no workspace selected.
+ *
+ * There is no token to thread through: the credential is attached by the
+ * `/api/proxy` route from the HttpOnly session cookie.
  */
 
 import { useMemo } from "react";
@@ -16,24 +19,22 @@ import { useSession } from "@/lib/session-context";
 
 export interface SessionRequest {
   options: RequestOptions | null;
-  /** True when both a token and an organization are available. */
+  /** True when a workspace is selected and a session exists. */
   ready: boolean;
   organizationId: string | null;
-  token: string | null;
 }
 
 export function useSessionRequest(): SessionRequest {
-  const { token, organizationId } = useSession();
+  const { signedIn, organizationId } = useSession();
 
   const options = useMemo<RequestOptions | null>(() => {
-    if (!token || !organizationId) return null;
-    return { token, organizationId };
-  }, [token, organizationId]);
+    if (!signedIn || !organizationId) return null;
+    return { organizationId };
+  }, [signedIn, organizationId]);
 
   return {
     options,
     ready: options !== null,
     organizationId,
-    token,
   };
 }

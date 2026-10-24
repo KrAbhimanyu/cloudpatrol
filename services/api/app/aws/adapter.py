@@ -85,6 +85,11 @@ class AwsCallError(AppError):
 _PERMISSION_CODES = frozenset(
     {"AccessDenied", "AccessDeniedException", "UnauthorizedOperation", "AuthFailure"}
 )
+# AssumeRole-specific codes. ``AccessDenied`` from sts:AssumeRole covers both a
+# wrong external ID and a trust policy that does not list CloudPatrol, so it is
+# handled separately by the caller which has the context to tell them apart.
+_ASSUME_ROLE_ACCESS_DENIED = frozenset({"AccessDenied", "AccessDeniedException"})
+_ROLE_NOT_FOUND_CODES = frozenset({"NoSuchEntity", "NoSuchEntityException"})
 _THROTTLE_CODES = frozenset(
     {"Throttling", "ThrottlingException", "RequestLimitExceeded", "TooManyRequestsException"}
 )
@@ -141,6 +146,50 @@ def translate_client_error(exc: ClientError, *, service: str) -> AppError:
         status_code=502,
         details={"service": service, "aws_code": aws_code, "http_status": http_status},
     )
+
+
+def translate_assume_role_error(exc: ClientError) -> AppError:
+    """Classify an sts:AssumeRole failure into an actionable error.
+
+    AWS returns ``AccessDenied`` for several different misconfigurations. The
+    caller cannot be told which one from the code alone, so the distinction is
+    made here, where the AWS error *message* is still available. The message is
+    used to choose the code and is never forwarded to the client: it can echo
+    the role ARN, the external ID it received, and the account ID.
+    """
+    error = exc.response.get("Error", {})
+    aws_code = str(error.get("Code", "Unknown"))
+    aws_message = str(error.get("Message", "")).lower()
+
+    if aws_code in _ROLE_NOT_FOUND_CODES or "not found" in aws_message:
+        return AwsCallError(
+            "The role ARN does not exist, or the role has been deleted.",
+            code=ErrorCode.AWS_ROLE_NOT_FOUND,
+            status_code=400,
+            details={"aws_code": aws_code},
+        )
+
+    if aws_code in _ASSUME_ROLE_ACCESS_DENIED:
+        # AWS phrases a rejected external ID as "not authorized to perform
+        # sts:AssumeRole" and a missing trust relationship almost identically,
+        # but names the external ID when the condition itself failed.
+        if "external" in aws_message or "condition" in aws_message:
+            return AwsCallError(
+                "The external ID was rejected. Check that it matches the value in the "
+                "role's trust policy.",
+                code=ErrorCode.AWS_EXTERNAL_ID_INVALID,
+                status_code=400,
+                details={"aws_code": aws_code},
+            )
+        return AwsCallError(
+            "AWS denied the role assumption. Check that the trust policy lists "
+            "CloudPatrol and that the external ID matches.",
+            code=ErrorCode.AWS_PERMISSION_DENIED,
+            status_code=403,
+            details={"aws_code": aws_code},
+        )
+
+    return translate_client_error(exc, service="sts")
 
 
 def translate_transport_error(exc: Exception, *, service: str) -> AppError:

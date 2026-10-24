@@ -36,21 +36,21 @@ export function FindingCard({
   finding: Finding;
   onReviewed?: () => void;
 }) {
-  const { token, organizationId } = useSession();
+  const { signedIn, organizationId } = useSession();
   const [pending, setPending] = useState<"acknowledged" | "dismissed" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const meta = DETECTOR_META[finding.detector];
   const priced = finding.estimated_monthly_savings !== null;
   const reviewable = finding.state === "estimated" || finding.state === "acknowledged";
-  const canAct = reviewable && token !== null && organizationId !== null && pending === null;
+  const canAct = reviewable && signedIn && organizationId !== null && pending === null;
 
   async function review(state: "acknowledged" | "dismissed") {
-    if (!token || !organizationId || !canAct) return;
+    if (!signedIn || !organizationId || !canAct) return;
     setPending(state);
     setError(null);
     try {
-      await api.reviewFinding({ token, organizationId }, finding.id, { state });
+      await api.reviewFinding({ organizationId }, finding.id, { state });
       onReviewed?.();
     } catch (cause) {
       setError(

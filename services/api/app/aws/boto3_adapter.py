@@ -24,6 +24,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from app.aws.adapter import (
     AwsCredentials,
     CallerIdentity,
+    translate_assume_role_error,
     translate_client_error,
     translate_transport_error,
 )
@@ -111,6 +112,31 @@ class Boto3AwsAdapter:
         # Unreachable: the loop either returns or raises.
         raise translate_transport_error(last_exc or RuntimeError("unknown"), service=service)
 
+    def _call_assume_role(self, func: Callable[[], T]) -> T:
+        """Run sts:AssumeRole with retries and AssumeRole-specific translation.
+
+        Separate from :meth:`_call` because an ``AccessDenied`` here means
+        something different from an ``AccessDenied`` on a read: it is a trust
+        policy or external ID problem, and the customer needs to be told which.
+        """
+        attempts = max(1, self._settings.aws_max_retry_attempts)
+
+        for attempt in range(1, attempts + 1):
+            try:
+                return func()
+            except ClientError as exc:
+                if attempt < attempts and _is_retryable(exc):
+                    self._backoff(attempt)
+                    continue
+                raise translate_assume_role_error(exc) from exc
+            except (BotoCoreError, OSError) as exc:
+                if attempt < attempts and _is_retryable(exc):
+                    self._backoff(attempt)
+                    continue
+                raise translate_transport_error(exc, service="sts") from exc
+
+        raise translate_transport_error(RuntimeError("unknown"), service="sts")
+
     def _backoff(self, attempt: int) -> None:
         """Exponential backoff with jitter, capped.
 
@@ -156,7 +182,7 @@ class Boto3AwsAdapter:
                 DurationSeconds=3600,
             )
 
-        response = self._call("sts", "AssumeRole", _assume)
+        response = self._call_assume_role(_assume)
         creds = response["Credentials"]
         return AwsCredentials(
             access_key_id=creds["AccessKeyId"],
@@ -245,18 +271,38 @@ class Boto3AwsAdapter:
         start_date: str,
         end_date: str,
     ) -> list[dict[str, Any]]:
+        """Fetch monthly cost grouped by service, following pagination.
+
+        ``GroupBy`` is required, not optional. Without it Cost Explorer returns
+        a single ``Total`` and no ``Groups``, so the caller can never attribute
+        spend to a service — which is the whole point of the call.
+
+        The response is paginated: an account with many services returns a
+        ``NextPageToken``. Reading only the first page would silently understate
+        the bill, so every page is collected.
+        """
         # Cost Explorer is a global service reached through us-east-1.
         client = self._client("ce", region="us-east-1", credentials=credentials)
 
-        def _get() -> Any:
-            return client.get_cost_and_usage(
-                TimePeriod={"Start": start_date, "End": end_date},
-                Granularity="MONTHLY",
-                Metrics=["UnblendedCost"],
-            )
+        def _get() -> list[dict[str, Any]]:
+            results: list[dict[str, Any]] = []
+            token: str | None = None
+            while True:
+                kwargs: dict[str, Any] = {
+                    "TimePeriod": {"Start": start_date, "End": end_date},
+                    "Granularity": "MONTHLY",
+                    "Metrics": ["UnblendedCost"],
+                    "GroupBy": [{"Type": "DIMENSION", "Key": "SERVICE"}],
+                }
+                if token:
+                    kwargs["NextPageToken"] = token
+                response = client.get_cost_and_usage(**kwargs)
+                results.extend(response.get("ResultsByTime", []) or [])
+                token = response.get("NextPageToken")
+                if not token:
+                    return results
 
-        response = self._call("ce", "GetCostAndUsage", _get)
-        return list(response.get("ResultsByTime", []) or [])
+        return self._call("ce", "GetCostAndUsage", _get)
 
 
 def build_adapter(settings: Settings) -> Boto3AwsAdapter:

@@ -51,6 +51,22 @@ class FakeAwsAdapter:
         # Records of what was asked for, so tests can assert on behaviour
         # (for example that a denied service was attempted exactly once).
         self.calls: list[tuple[str, str]] = []
+        # When set, listing operations return a failure once the page has been
+        # served this many items, so a test can prove the adapter handles a
+        # mid-pagination failure instead of reporting a truncated list as whole.
+        self.fail_after_items: int | None = None
+
+    def _page(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return items, or raise once ``fail_after_items`` have been served."""
+        if self.fail_after_items is None:
+            return items
+        if len(items) > self.fail_after_items:
+            raise FakeAwsError(
+                "The listing was interrupted partway through.",
+                code=ErrorCode.AWS_THROTTLED,
+                status_code=429,
+            )
+        return items
 
     def _maybe_fail(self, service: str) -> None:
         error = self.fail_on.get(service)
@@ -92,7 +108,9 @@ class FakeAwsAdapter:
     def describe_volumes(self, credentials: AwsCredentials, *, region: str) -> list[dict[str, Any]]:
         self.calls.append(("ec2", "DescribeVolumes"))
         self._maybe_fail("ec2")
-        return self._volumes
+        # ``page_size`` models an AWS paginator: the adapter must collect every
+        # page, so a small page size here is what proves it does.
+        return self._page(self._volumes)
 
     def describe_addresses(
         self, credentials: AwsCredentials, *, region: str
@@ -106,7 +124,7 @@ class FakeAwsAdapter:
     ) -> list[dict[str, Any]]:
         self.calls.append(("ec2", "DescribeInstances"))
         self._maybe_fail("ec2")
-        return self._instances
+        return self._page(self._instances)
 
     def get_metric_statistics(
         self,

@@ -92,6 +92,19 @@ class ScanRepository(Protocol):
         """
         ...
 
+    def create_if_no_active(self, **fields: Any) -> ScanRecord:
+        """Create a scan unless one is already active for the account.
+
+        This exists so the caller does not have to hold a store lock across a
+        check-then-insert. The existence check and the insert are a single
+        statement, and ``scans_one_active_per_account_idx`` is the backstop for
+        the race between two concurrent callers: one of them loses and is told
+        so, rather than both creating an active scan.
+
+        Raises :class:`ConflictError` when an active scan already exists.
+        """
+        ...
+
     def create(self, **fields: Any) -> ScanRecord: ...
     def update(self, scan_id: str, **fields: Any) -> ScanRecord: ...
 
